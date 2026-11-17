@@ -1,26 +1,119 @@
 name: pipeline
 on: [push, pull_request]
+
+# Least privilege: neither job needs to write to the repository via GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt && pytest -q
-  deploy:
+  # compliance-agents: every infrastructure change gets a reviewable plan. On pull requests the
+  # plan is shown to PR reviewers; on push to main it is the exact plan that `deploy` applies
+  # after a production approver has reviewed it in this run's summary.
+  terraform-plan:
+    name: Terraform plan
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+      - name: Plan infrastructure
+        run: |
+          set -euo pipefail
+          if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+            terraform -chdir=infra init -input=false
+            terraform -chdir=infra plan -input=false -lock=false -no-color -out=tfplan
+            terraform -chdir=infra show -no-color tfplan > plan.txt
+          else
+            terraform -chdir=infra init -input=false -backend=false
+            terraform -chdir=infra validate -no-color
+            echo "[demo] no cloud credentials; would run: terraform -chdir=infra plan -out=tfplan" > plan.txt
+          fi
+          {
+            echo "## Terraform plan (infra/)"
+            echo '```'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload plan for review and apply
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tfplan
+          path: |
+            plan.txt
+            infra/tfplan
+          if-no-files-found: warn
+          retention-days: 5
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [test, terraform-plan]
+    # compliance-agents: production deploys only from pushes to the protected default branch,
+    # never from pull_request events or other branches.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # compliance-agents: protected environment; required reviewers, prevent self-review and
+    # deployment-branch restrictions are configured in Settings -> Environments -> production.
+    environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    # Read-only token; actions/deployments read lets the HRIS step resolve environment approvers
+    # and lets the apply step download the reviewed plan artifact from this run.
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+    steps:
+      # compliance-agents: verify the deployer and approvers are active staff (HRIS)
+      - uses: humzy3d/compliance-agents@5bc8624537e6f91037d04a8234ad67720dc76ef5 # v0.1.0
+        with:
+          mode: verify-deployer
+          hris-provider: csv            # csv | http (see README for Workday/BambooHR adapters)
+          hris-source: ${{ secrets.HRIS_ROSTER_URL }}
+          allowed-roles: engineer,sre
+          github-token: ${{ github.token }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+      # compliance-agents: fetch the exact plan produced (and reviewed) earlier in this run.
+      - name: Download reviewed plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: gh run download "$RUN_ID" --name tfplan --dir "$RUNNER_TEMP/tfplan"
+      # compliance-agents: apply only the saved plan; never `apply -auto-approve` an unreviewed diff.
       - name: Apply infrastructure
         run: |
-          if [ -n "$AWS_ACCESS_KEY_ID" ]; then
-            terraform -chdir=infra init && terraform -chdir=infra apply -auto-approve
+          set -euo pipefail
+          plan="$RUNNER_TEMP/tfplan/infra/tfplan"
+          if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+            if [ ! -f "$plan" ]; then
+              echo "::error::No saved plan from the terraform-plan job; refusing to apply."
+              exit 1
+            fi
+            cp "$plan" infra/tfplan
+            terraform -chdir=infra init -input=false
+            terraform -chdir=infra apply -input=false tfplan
           else
-            echo "[demo] no cloud credentials; would run: terraform -chdir=infra apply -auto-approve"
+            echo "[demo] no cloud credentials; would run: terraform -chdir=infra apply tfplan (saved, reviewed plan)"
           fi
       - name: Deploy app
         run: |
