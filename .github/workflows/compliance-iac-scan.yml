@@ -1,0 +1,43 @@
+name: compliance-iac-scan
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkov:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkov (infra/)
+        uses: bridgecrewio/checkov-action@3f0caf0c3aa9f56ade6b49f6e60b63aaeafb75a3 # v12.3141.0
+        with:
+          directory: infra
+          framework: terraform
+          output_format: cli,sarif
+          output_file_path: console,results.sarif
+          soft_fail: false
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        continue-on-error: true   # code scanning may be unavailable on this plan; artifact below is the fallback
+        with:
+          sarif_file: results.sarif
+          category: checkov-iac
+      - name: Keep SARIF as artifact
+        if: always() && hashFiles('results.sarif') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: checkov-sarif
+          path: results.sarif
+          retention-days: 30
