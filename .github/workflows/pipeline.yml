@@ -23,4 +23,5 @@ jobs:
             echo "[demo] no cloud credentials; would run: terraform -chdir=infra apply -auto-approve"
           fi
       - name: Deploy app
-        run: echo "[demo] would run: flyctl deploy --remote-only"
+        run: |
+          echo "[demo] would run: flyctl deploy --remote-only"
