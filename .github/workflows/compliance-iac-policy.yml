@@ -1,0 +1,18 @@
+# Added by compliance-agents. Gate: gate.iac-policy (objective: iac-policy)
+# Controls: FedRAMP KSI-CNA-EIS, KSI-MLA-EVC | CSA CCM CCC-06 | PCI DSS 2.2.1
+# Evaluates Terraform HCL directly against policy/terraform/*.rego (no cloud credentials needed).
+name: compliance-iac-policy
+on:
+  pull_request:
+    paths: ["**/*.tf", "policy/**"]
+permissions:
+  contents: read
+jobs:
+  conftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Conftest (OPA) policy check
+        run: |
+          docker run --rm -v "$PWD:/project" -w /project openpolicyagent/conftest:v0.71.1 \
+            test --parser hcl2 --policy policy/terraform infra/*.tf
