@@ -1,26 +1,87 @@
 name: pipeline
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt && pytest -q
-  deploy:
+  # Reviewable Terraform plan on every PR and push. On main, the saved plan is what
+  # the production approver reviews and exactly what deploy applies.
+  plan:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - name: Apply infrastructure
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - name: Terraform fmt / validate
+        run: |
+          terraform -chdir=infra fmt -check -recursive
+          terraform -chdir=infra init -backend=false -input=false
+          terraform -chdir=infra validate
+      - name: Terraform plan
         run: |
           if [ -n "$AWS_ACCESS_KEY_ID" ]; then
-            terraform -chdir=infra init && terraform -chdir=infra apply -auto-approve
+            terraform -chdir=infra init -input=false
+            terraform -chdir=infra plan -input=false -lock-timeout=5m -out=tfplan
+            terraform -chdir=infra show -no-color tfplan > infra/tfplan.txt
+            cat infra/tfplan.txt >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "[demo] no cloud credentials; would run: terraform -chdir=infra apply -auto-approve"
+            echo "[demo] no cloud credentials; would run: terraform -chdir=infra plan -out=tfplan"
+          fi
+      - name: Upload reviewed plan
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tfplan
+          path: |
+            infra/tfplan
+            infra/tfplan.txt
+          if-no-files-found: ignore
+          retention-days: 5
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [test, plan]
+    # Production deploys only from pushes to the protected default branch, never from PRs or feature branches.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Protected environment: required reviewers + prevent self-review + main-only deployment branches (configure in Settings -> Environments).
+    environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read   # lets the HRIS check read the environment approval record for this run
+    steps:
+      # compliance-agents: verify the deployer and approvers are active staff (HRIS)
+      - uses: humzy3d/compliance-agents@v0
+        with:
+          mode: verify-deployer
+          hris-provider: csv            # csv | http (see README for Workday/BambooHR adapters)
+          hris-source: ${{ secrets.HRIS_ROSTER_URL }}
+          allowed-roles: engineer,sre
+          github-token: ${{ github.token }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - name: Download reviewed plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          name: tfplan
+          path: infra
+      - name: Apply infrastructure (reviewed plan only)
+        run: |
+          if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            test -f infra/tfplan || { echo "::error::No reviewed plan artifact from the plan job; refusing to apply"; exit 1; }
+            terraform -chdir=infra init -input=false
+            terraform -chdir=infra apply -input=false -lock-timeout=5m tfplan
+          else
+            echo "[demo] no cloud credentials; would run: terraform -chdir=infra apply tfplan"
           fi
       - name: Deploy app
         run: |
