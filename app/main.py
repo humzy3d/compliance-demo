@@ -11,8 +11,8 @@ DB = "payments.db"
 def payments():
     customer = request.args.get("customer", "")
     conn = sqlite3.connect(DB)
-    # Intentional SQL injection (CWE-89) so the SAST gate has something to catch.
-    rows = conn.execute(f"SELECT id, amount FROM payments WHERE customer = '{customer}'").fetchall()
+    # Parameterized query (fixes CWE-89 flagged by the SAST gate).
+    rows = conn.execute("SELECT id, amount FROM payments WHERE customer = ?", (customer,)).fetchall()
     return jsonify([{"id": r[0], "amount": r[1]} for r in rows])
 
 

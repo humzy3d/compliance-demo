@@ -1,0 +1,51 @@
+name: compliance-sbom-provenance
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom-provenance:
+    name: SBOM + signed provenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      # Sigstore keyless signing for attestations
+      attestations: write  # store attestations on the repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Package release artifact (source tree deployed by flyctl)
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix=app/ -o "dist/app-${GITHUB_SHA}.tar.gz" HEAD
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload artifact and SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Attest build provenance (signed)
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/app-${{ github.sha }}.tar.gz
+            dist/sbom.spdx.json

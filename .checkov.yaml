@@ -1,0 +1,10 @@
+# Accepted risks for the demo payments service. Each skip is a documented exception for the
+# POA&M / risk register, not a silent suppression. Review quarterly.
+skip-check:
+  # Cross-region replication: single-region by design for the demo; recovery uses versioning + backups.
+  # Owner: platform. Revisit if RTO/RPO (KSI-RPL-RRO) requires a second region.
+  - CKV_AWS_144
+  # S3 event notifications: no downstream consumer exists for export objects.
+  - CKV2_AWS_62
+  # Multi-AZ: single-AZ accepted for the demo tier; production tier must enable it.
+  - CKV_AWS_157
