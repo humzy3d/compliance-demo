@@ -1,0 +1,71 @@
+name: compliance-dependency-review
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency review (PR gate)
+    if: github.event_name == 'pull_request' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  pip-audit:
+    name: pip-audit (requirements.txt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade "pip-audit>=2.7,<3"
+
+      - name: Audit Python dependencies
+        shell: bash
+        run: |
+          status=0
+          pip-audit -r requirements.txt --vulnerability-service osv --desc on --format json --output pip-audit.json || status=$?
+          if [ -f pip-audit.json ]; then
+            python - <<'EOF'
+          import json
+          data = json.load(open("pip-audit.json"))
+          vulns = [(d["name"], d.get("version", "?"), v["id"], ",".join(v.get("fix_versions", [])) or "none")
+                   for d in data.get("dependencies", []) for v in d.get("vulns", [])]
+          print(f"{len(vulns)} known vulnerabilities")
+          for n, ver, vid, fix in vulns:
+              print(f"{n}=={ver} {vid} fix: {fix}")
+          EOF
+          fi
+          exit "${status}"
+
+      - name: Keep audit report as evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pip-audit-report
+          path: pip-audit.json
+          if-no-files-found: warn
+          retention-days: 90
