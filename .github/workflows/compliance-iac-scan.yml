@@ -23,6 +23,7 @@ jobs:
         uses: bridgecrewio/checkov-action@3f0caf0c3aa9f56ade6b49f6e60b63aaeafb75a3 # v12.3141.0
         with:
           directory: infra
+          config_file: .checkov.yaml
           framework: terraform
           output_format: cli,sarif
           output_file_path: console,results.sarif
