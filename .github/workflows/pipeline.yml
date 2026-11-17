@@ -1,0 +1,26 @@
+name: pipeline
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt && pytest -q
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Apply infrastructure
+        run: |
+          if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            terraform -chdir=infra init && terraform -chdir=infra apply -auto-approve
+          else
+            echo "[demo] no cloud credentials; would run: terraform -chdir=infra apply -auto-approve"
+          fi
+      - name: Deploy app
+        run: echo "[demo] would run: flyctl deploy --remote-only"
